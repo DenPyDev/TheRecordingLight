@@ -1,6 +1,8 @@
 #  The Recording Light
 #### Microphone Monitor
 
+![readme image](readme.png)
+
 This is a simple tool that allows users to monitor the volume level of a chosen microphone. The tool can provide visual feedback on whether the microphone is currently picking up sound, active or disabled.
 
 ## Why Use It?
