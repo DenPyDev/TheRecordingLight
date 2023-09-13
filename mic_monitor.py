@@ -41,6 +41,7 @@ class MicrophoneMonitorGUI:
 
         # Bindings for window drag
         self._bind_window_movements()
+        self._setup_context_menu()
 
         start_button = tk.Button(self.root, text="Start Monitoring", command=self.start_monitoring)
         start_button.pack(pady=5, padx=5)
@@ -62,6 +63,22 @@ class MicrophoneMonitorGUI:
         self.root.bind('<Button-1>', self._start_drag)
         self.root.bind('<ButtonRelease-1>', self._stop_drag)
         self.root.bind('<B1-Motion>', self._perform_drag)
+
+    def _setup_context_menu(self):
+        """Create context menu with exit option."""
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Exit", command=self._exit_app)
+        self.root.bind('<Button-3>', self._show_context_menu)
+
+    def _show_context_menu(self, event):
+        """Display the context menu on right click."""
+        self.context_menu.post(event.x_root, event.y_root)
+
+    def _exit_app(self):
+        """Exit the application."""
+        self.root.quit()
+        self.root.destroy()
+
 
     def _start_drag(self, event):
         self.start_x, self.start_y = event.x, event.y
