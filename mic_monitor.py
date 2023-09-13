@@ -3,63 +3,107 @@ import numpy as np
 import tkinter as tk
 from tkinter import ttk
 
+# Constants
 ALPHA = 1.0
+WINDOW_SIZE = "100x30"
 
 
-class MicrophoneDeviceProvider:
+class Microphone:
+    """Provider for microphone-related functionalities."""
+
     @staticmethod
-    def get_devices():
+    def get_device_names():
         return [device['name'] for device in sd.query_devices()]
 
-
-class AudioAnalyzer:
     @staticmethod
-    def get_normalized_volume(indata):
-        return np.linalg.norm(indata) * 10
+    def get_input_stream(device_index, callback):
+        return sd.InputStream(device=device_index, callback=callback)
+
+    @staticmethod
+    def calculate_normalized_volume(data):
+        return np.linalg.norm(data) * 10
 
 
-class MicrophoneMonitorUI:
-    def __init__(self, master):
-        self.master = master
-        self.master.overrideredirect(True)
-        self.label = tk.Label(self.master)
-        self.label.pack(pady=0, padx=0, expand=True, fill="both")
+class MicrophoneMonitorGUI:
+    """GUI for microphone monitoring."""
 
-        self.devices_combobox = ttk.Combobox(self.master, values=MicrophoneDeviceProvider.get_devices())
-        self.devices_combobox.pack(pady=0, padx=0)
-        self.devices_combobox.set("Select a Microphone")
+    def __init__(self, root):
+        self.root = root
+        self._setup_ui()
 
-        start_button = tk.Button(self.master, text="Start Monitoring", command=self.start_monitoring)
+    def _setup_ui(self):
+        # Basic UI properties
+        self.root.overrideredirect(True)
+
+        # UI Elements
+        self.status_label = self._create_label(self.root)
+        self.device_dropdown = self._create_device_dropdown(self.root)
+
+        # Bindings for window drag
+        self._bind_window_movements()
+
+        start_button = tk.Button(self.root, text="Start Monitoring", command=self.start_monitoring)
         start_button.pack(pady=5, padx=5)
 
-    def configure_window(self, bg_color, geometry_size):
-        self.master.configure(background=bg_color)
-        self.master.geometry(geometry_size)
+    def _create_label(self, master):
+        label = tk.Label(master)
+        label.pack(pady=0, padx=0, expand=True, fill="both")
+        return label
 
-    def configure_label(self, text, font_size, bg_color, fg_color="white"):
-        self.label.config(text=text, bg=bg_color, fg=fg_color, font=("Arial", font_size, "bold"))
+    def _create_device_dropdown(self, master):
+        devices = Microphone.get_device_names()
+        dropdown = ttk.Combobox(master, values=devices)
+        dropdown.pack(pady=0, padx=0)
+        dropdown.set("Select a Microphone")
+        return dropdown
 
-    def audio_callback(self, indata, frames, time, status):
-        volume_norm = AudioAnalyzer.get_normalized_volume(indata)
+    def _bind_window_movements(self):
+        """Bind functions for moving the GUI window."""
+        self.root.bind('<Button-1>', self._start_drag)
+        self.root.bind('<ButtonRelease-1>', self._stop_drag)
+        self.root.bind('<B1-Motion>', self._perform_drag)
+
+    def _start_drag(self, event):
+        self.start_x, self.start_y = event.x, event.y
+
+    def _stop_drag(self, event):
+        self.start_x = self.start_y = None
+
+    def _perform_drag(self, event):
+        dx, dy = event.x - self.start_x, event.y - self.start_y
+        new_pos_x, new_pos_y = self.root.winfo_x() + dx, self.root.winfo_y() + dy
+        self.root.geometry(f"+{new_pos_x}+{new_pos_y}")
+
+    def _update_ui(self, volume_norm):
         if volume_norm == 0.0:
-            self.configure_window("green", "30x15")
-            self.configure_label("OFF", 10, "green")
-            self.master.wm_attributes('-alpha', ALPHA)  # Make the window solid
+            self._set_window_properties("green", WINDOW_SIZE)
+            self._set_label_properties("OFF", 20, "green")
         else:
-            self.configure_window("red", "100x30")
-            self.configure_label("ON AIR", 20, "red")
-            self.master.wm_attributes('-alpha', ALPHA)  # Make the window 50% transparent
-        self.master.update()
+            self._set_window_properties("red", WINDOW_SIZE)
+            self._set_label_properties("ON AIR", 20, "red")
+        self.root.wm_attributes('-alpha', ALPHA)
+
+    def _set_window_properties(self, bg_color, geometry):
+        self.root.configure(background=bg_color)
+        self.root.geometry(geometry)
+
+    def _set_label_properties(self, text, font_size, bg_color, fg_color="white"):
+        self.status_label.config(text=text, bg=bg_color, fg=fg_color, font=("Arial", font_size, "bold"))
+
+    def _audio_data_callback(self, indata, frames, time, status):
+        volume_norm = Microphone.calculate_normalized_volume(indata)
+        self._update_ui(volume_norm)
+        self.root.update()
 
     def start_monitoring(self):
-        device_index = self.devices_combobox.current()
-        with sd.InputStream(device=device_index, callback=self.audio_callback):
-            self.master.attributes('-topmost', True)
-            self.master.mainloop()
+        device_index = self.device_dropdown.current()
+        with Microphone.get_input_stream(device_index, self._audio_data_callback):
+            self.root.attributes('-topmost', True)
+            self.root.mainloop()
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MicrophoneMonitorUI(root)
-    root.wait_visibility(root)
-    root.mainloop()
+    main_window = tk.Tk()
+    app = MicrophoneMonitorGUI(main_window)
+    main_window.wait_visibility(main_window)
+    main_window.mainloop()
