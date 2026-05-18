@@ -1,126 +1,252 @@
-import sounddevice as sd
-import numpy as np
-import tkinter as tk
-from tkinter import ttk
+import sys
+import threading
+import time
 
-# Constants
-ALPHA = 1.0
-WINDOW_SIZE = "100x30"
+try:
+    import tkinter as tk
+except Exception:
+    tk = None
 
+from audio_devices import BLOCK, discover_devices, level_value, open_recorder, resolve_microphone, startup_errors
+from ui_badge import RecordingBadge
 
-class Microphone:
-    """Provider for microphone-related functionalities."""
+POLL_MS = 50
+THRESHOLD = 1e-6
+HOLD_SECONDS = 10.0
 
-    @staticmethod
-    def get_device_names():
-        return [device['name'] for device in sd.query_devices()]
-
-    @staticmethod
-    def get_input_stream(device_index, callback):
-        return sd.InputStream(device=device_index, callback=callback)
-
-    @staticmethod
-    def calculate_normalized_volume(data):
-        return np.linalg.norm(data) * 10
+ROW_IDLE = "#f4f4f4"
+ROW_SELECTED = "#eef5ff"
+ROW_ACTIVE = "#ffdede"
+ROW_ERROR = "#ffe8c7"
 
 
-class MicrophoneMonitorGUI:
-    """GUI for microphone monitoring."""
-
+class App:
     def __init__(self, root):
         self.root = root
-        self._setup_ui()
+        self.root.title("Recording Light")
+        self.root.resizable(False, False)
 
-    def _setup_ui(self):
-        # Basic UI properties
-        self.root.overrideredirect(True)
+        self.rows = {}
+        self.levels = {}
+        self.errors = set()
+        self.threads = []
+        self.stop_event = threading.Event()
+        self.session = 0
+        self.hold_until = 0.0
+        self.running = False
+        self.toggle_var = tk.BooleanVar(value=False)
+        self.badge = RecordingBadge(root, on_stop=self.stop, on_exit=self.close)
 
-        # UI Elements
-        self.status_label = self._create_label(self.root)
-        self.device_dropdown = self._create_device_dropdown(self.root)
+        self.build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-        # Bindings for window drag
-        self._bind_window_movements()
-        self._setup_context_menu()
+    def build_ui(self):
+        frame = tk.Frame(self.root, padx=10, pady=10)
+        frame.pack(fill="both", expand=True)
 
-        start_button = tk.Button(self.root, text="Start Monitoring", command=self.start_monitoring)
-        start_button.pack(pady=5, padx=5)
+        errors = startup_errors()
+        devices = discover_devices() if not errors else []
+        if errors or not devices:
+            message = "\n\n".join(errors) if errors else (
+                "No microphones found.\n"
+                "Check mic permissions and make sure an input device is connected."
+            )
+            tk.Label(
+                frame,
+                text=message,
+                fg="red",
+                justify="left",
+                anchor="w",
+                wraplength=520,
+            ).pack(fill="x")
+            return
 
-    def _create_label(self, master):
-        label = tk.Label(master)
-        label.pack(pady=0, padx=0, expand=True, fill="both")
-        return label
+        tk.Label(frame, text="Microphones", anchor="w").pack(fill="x", pady=(0, 6))
+        list_frame = tk.Frame(frame)
+        list_frame.pack(fill="both", expand=True)
 
-    def _create_device_dropdown(self, master):
-        devices = Microphone.get_device_names()
-        dropdown = ttk.Combobox(master, values=devices)
-        dropdown.pack(pady=0, padx=0)
-        dropdown.set("Select a Microphone")
-        return dropdown
+        for device in devices:
+            row = tk.Frame(list_frame, bg=ROW_IDLE, padx=6, pady=4)
+            row.pack(fill="x", pady=2)
 
-    def _bind_window_movements(self):
-        """Bind functions for moving the GUI window."""
-        self.root.bind('<Button-1>', self._start_drag)
-        self.root.bind('<ButtonRelease-1>', self._stop_drag)
-        self.root.bind('<B1-Motion>', self._perform_drag)
+            selected = tk.BooleanVar()
+            check = tk.Checkbutton(
+                row,
+                text=device.name,
+                variable=selected,
+                command=self.on_selection_change,
+                anchor="w",
+                bg=ROW_IDLE,
+                activebackground=ROW_IDLE,
+                highlightthickness=0,
+            )
+            check.pack(side="left", fill="x", expand=True)
 
-    def _setup_context_menu(self):
-        """Create context menu with exit option."""
-        self.context_menu = tk.Menu(self.root, tearoff=0)
-        self.context_menu.add_command(label="Exit", command=self._exit_app)
-        self.root.bind('<Button-3>', self._show_context_menu)
+            status = tk.Label(row, text="idle", width=9, anchor="e", bg=ROW_IDLE)
+            status.pack(side="right", padx=(8, 0))
+            level = tk.Label(row, text="-", width=7, anchor="e", bg=ROW_IDLE)
+            level.pack(side="right")
 
-    def _show_context_menu(self, event):
-        """Display the context menu on right click."""
-        self.context_menu.post(event.x_root, event.y_root)
+            self.rows[device.key] = {
+                "device": device,
+                "selected": selected,
+                "row": row,
+                "check": check,
+                "status": status,
+                "level": level,
+            }
 
-    def _exit_app(self):
-        """Exit the application."""
-        self.root.quit()
+        self.toggle = tk.Checkbutton(
+            frame,
+            text="Start Monitoring",
+            variable=self.toggle_var,
+            indicatoron=False,
+            command=self.on_toggle,
+            padx=12,
+            pady=8,
+        )
+        self.toggle.pack(fill="x", pady=(10, 0))
+        self.paint()
+
+    def selected_devices(self):
+        return [
+            row["device"]
+            for row in self.rows.values()
+            if row["selected"].get()
+        ]
+
+    def on_selection_change(self):
+        if self.running:
+            if self.selected_devices():
+                self.start()
+            else:
+                self.stop()
+        self.paint()
+
+    def on_toggle(self):
+        if self.toggle_var.get():
+            self.start()
+        else:
+            self.stop()
+
+    def worker(self, device, session):
+        try:
+            mic = resolve_microphone(device)
+            if mic is None:
+                raise RuntimeError
+            with open_recorder(mic) as recorder:
+                while session == self.session and not self.stop_event.is_set():
+                    data = recorder.record(numframes=BLOCK)
+                    self.levels[device.key] = level_value(data)
+        except Exception:
+            self.errors.add(device.key)
+            self.levels[device.key] = 0.0
+
+    def start(self):
+        devices = self.selected_devices()
+        if not devices:
+            self.running = False
+            self.toggle_var.set(False)
+            self.badge.hide()
+            self.paint()
+            return
+
+        self.session += 1
+        self.stop_event.set()
+        self.threads.clear()
+
+        self.running = True
+        self.errors.clear()
+        self.levels = {device.key: 0.0 for device in devices}
+        self.hold_until = 0.0
+        self.stop_event = threading.Event()
+
+        for device in devices:
+            thread = threading.Thread(
+                target=self.worker,
+                args=(device, self.session),
+                daemon=True,
+            )
+            thread.start()
+            self.threads.append(thread)
+
+        self.toggle_var.set(True)
+        self.paint()
+        self.poll(self.session)
+
+    def stop(self):
+        self.running = False
+        self.toggle_var.set(False)
+        self.session += 1
+        self.stop_event.set()
+        self.threads.clear()
+        self.levels.clear()
+        self.errors.clear()
+        self.hold_until = 0.0
+        self.badge.hide()
+        self.paint()
+
+    def poll(self, session):
+        if session != self.session:
+            return
+
+        now = time.monotonic()
+        if any(
+                row["selected"].get() and self.levels.get(key, 0.0) >= THRESHOLD
+                for key, row in self.rows.items()
+        ):
+            self.hold_until = now + HOLD_SECONDS
+
+        if self.running and now < self.hold_until:
+            self.badge.show()
+        else:
+            self.badge.hide()
+
+        self.paint()
+        self.root.after(POLL_MS, lambda: self.poll(session))
+
+    def paint(self):
+        if hasattr(self, "toggle"):
+            active = self.running
+            self.toggle.config(
+                text="Stop Monitoring" if active else "Start Monitoring",
+                bg="#ffdede" if active else "#e7f1e7",
+                activebackground="#ffdede" if active else "#e7f1e7",
+            )
+
+        for key, row in self.rows.items():
+            selected = row["selected"].get()
+            level = self.levels.get(key, 0.0) if self.running and selected else 0.0
+            errored = self.running and key in self.errors
+            active = self.running and selected and level >= THRESHOLD and not errored
+
+            if errored:
+                bg, state = ROW_ERROR, "error"
+            elif active:
+                bg, state = ROW_ACTIVE, "active"
+            elif selected:
+                bg, state = ROW_SELECTED, "armed" if self.running else "selected"
+            else:
+                bg, state = ROW_IDLE, "idle"
+
+            row["row"].config(bg=bg)
+            row["check"].config(bg=bg, activebackground=bg, selectcolor=bg)
+            row["status"].config(bg=bg, text=state)
+            row["level"].config(bg=bg, text=f"{level:.3f}" if self.running and selected else "-")
+
+    def close(self):
+        self.stop()
         self.root.destroy()
 
 
-    def _start_drag(self, event):
-        self.start_x, self.start_y = event.x, event.y
-
-    def _stop_drag(self, event):
-        self.start_x = self.start_y = None
-
-    def _perform_drag(self, event):
-        dx, dy = event.x - self.start_x, event.y - self.start_y
-        new_pos_x, new_pos_y = self.root.winfo_x() + dx, self.root.winfo_y() + dy
-        self.root.geometry(f"+{new_pos_x}+{new_pos_y}")
-
-    def _update_ui(self, volume_norm):
-        if volume_norm == 0.0:
-            self._set_window_properties("green", WINDOW_SIZE)
-            self._set_label_properties("OFF", 20, "green")
-        else:
-            self._set_window_properties("red", WINDOW_SIZE)
-            self._set_label_properties("ON AIR", 20, "red")
-        self.root.wm_attributes('-alpha', ALPHA)
-
-    def _set_window_properties(self, bg_color, geometry):
-        self.root.configure(background=bg_color)
-        self.root.geometry(geometry)
-
-    def _set_label_properties(self, text, font_size, bg_color, fg_color="white"):
-        self.status_label.config(text=text, bg=bg_color, fg=fg_color, font=("Arial", font_size, "bold"))
-
-    def _audio_data_callback(self, indata, frames, time, status):
-        volume_norm = Microphone.calculate_normalized_volume(indata)
-        self._update_ui(volume_norm)
-        self.root.update()
-
-    def start_monitoring(self):
-        device_index = self.device_dropdown.current()
-        with Microphone.get_input_stream(device_index, self._audio_data_callback):
-            self.root.attributes('-topmost', True)
-            self.root.mainloop()
+def main():
+    if tk is None:
+        print("No `tkinter` module. On Ubuntu/Debian install `python3-tk`.", file=sys.stderr)
+        raise SystemExit(1)
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    main_window = tk.Tk()
-    app = MicrophoneMonitorGUI(main_window)
-    main_window.wait_visibility(main_window)
-    main_window.mainloop()
+    main()

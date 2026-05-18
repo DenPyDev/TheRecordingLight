@@ -1,69 +1,35 @@
-#  The Recording Light
-#### Microphone Monitor
+# The Recording Light
 
-![readme image](readme.png)
+Shows a red badge when one of the selected microphones is active.
 
-This is a simple tool that allows users to monitor the volume level of a chosen microphone. The tool can provide visual feedback on whether the microphone is currently picking up sound, active or disabled.
+It lists the microphones it can see, lets you tick the ones you want, and keeps the badge on for 10 seconds after the
+last sound. On Linux it also checks `pactl`, because `soundcard` alone can miss a mic.
 
-## Why Use It?
+## Run
 
-This tool can quickly let you know if your microphone
-is currently transmitting sound.
-This is especially useful if you're concerned
-about background noises or if you're muting and
-unmuting frequently.
+```bash
+bash run.sh
+```
 
+That creates `.venv` if needed, installs requirements, and starts the app.
 
-## Installation
+If startup fails:
 
-### Prerequisites
+- Missing `tkinter` on Debian/Ubuntu:
 
-Before you can run the application, ensure that you have Python installed on your machine along with the following libraries:
+```bash
+sudo apt-get install python3-tk
+```
 
-- sounddevice
-- numpy
-- tkinter
+## How it behaves
 
-### Installation Steps:
+- Only checked microphones are monitored.
+- Each checked row shows `idle`, `armed`, `active`, or `error`.
+- The numeric level is live.
+- The badge lights on very small activity too.
+- If nothing else happens for 10 seconds, it hides.
 
-#### Windows:
+## Notes
 
-1. Install Python:
-    - Download the Python installer from the [official website](https://www.python.org/downloads/).
-    - Install Python and make sure to tick the "Add Python to PATH" option during installation.
-  
-2. Install required libraries:
-    ```bash
-    pip install sounddevice numpy
-    ```
-
-3. Save the provided code in a file named `mic_monitor.py`.
-
-4. Run the tool:
-    ```bash
-    python mic_monitor.py
-    ```
-
-#### Linux:
-
-
-1. Install required libraries:
-    ```bash
-    pip3 install sounddevice numpy
-    sudo apt-get install portaudio19-dev
-    ```
-
-2. Run the tool:
-    ```bash
-    python3 mic_monitor.py
-    ```
-
-## Usage
-
-1. When the tool starts, select your desired microphone from the dropdown list.
-2. Click the "Start Monitoring" button.
-3. The tool will display a small window. 
-    - **Green with "OFF" label**: Indicates the microphone is not picking up any sound.
-    - **Red with "ON AIR" label**: Indicates the microphone is currently active and picking up sound.
-
-That's it! Now you can easily monitor your microphone's activity.
+- Device names come from the backend.
+- If a microphone disappears while the app is running, that row flips to `error`.
